@@ -26,12 +26,16 @@ services:
       - test-net
     depends_on:
       - mosquitto
+    environment:
+      - SERVERADDRESS=${SERVERADDRESS:-tcp://mosquitto:1883}
   sub:
     build: subscriber/.
     networks:
       - test-net
     depends_on:
       - mosquitto
+    environment:
+      - SERVERADDRESS=${SERVERADDRESS:-tcp://mosquitto:1883}
     volumes:
       - type: bind
         source: ./binds/sub

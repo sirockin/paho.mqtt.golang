@@ -17,6 +17,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"sync"
@@ -29,21 +30,23 @@ import (
 // Connect to the broker and publish a message periodically
 
 const (
-	TOPIC         = "topic1"
-	QOS           = 1
-	SERVERADDRESS = "tcp://mosquitto:1883"
-	DELAY         = time.Second
-	CLIENTID      = "mqtt_publisher"
+	TOPIC    = "topic1"
+	QOS      = 1
+	DELAY    = time.Second
+	CLIENTID = "mqtt_publisher"
 
 	WRITETOLOG = true // If true then published messages will be written to the console
 )
 
 func main() {
-	// Enable logging by uncommenting the below
-	// mqtt.ERROR = log.New(os.Stdout, "[ERROR] ", 0)
-	// mqtt.CRITICAL = log.New(os.Stdout, "[CRITICAL] ", 0)
-	// mqtt.WARN = log.New(os.Stdout, "[WARN]  ", 0)
-	// mqtt.DEBUG = log.New(os.Stdout, "[DEBUG] ", 0)
+	SERVERADDRESS := os.Getenv("SERVERADDRESS")
+	fmt.Printf("SERVERADDRESS: %s\n", SERVERADDRESS)
+
+	mqtt.ERROR = log.New(os.Stdout, "[ERROR] ", 0)
+	mqtt.CRITICAL = log.New(os.Stdout, "[CRITICAL] ", 0)
+	mqtt.WARN = log.New(os.Stdout, "[WARN]  ", 0)
+	mqtt.DEBUG = log.New(os.Stdout, "[DEBUG] ", 0)
+
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(SERVERADDRESS)
 	opts.SetClientID(CLIENTID)
