@@ -1381,7 +1381,6 @@ func Test_ConnectRetryPublish2(t *testing.T) {
 	defer destroyTempBroker(t, dockerClient, containerID)
 
 	t.Log("Broker now up and running")
-	time.Sleep(10 * time.Second)
 
 	// Connect the subscriber
 	if token := s.Connect(); token.Wait() && token.Error() != nil {
