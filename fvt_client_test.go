@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"strconv"
 	"sync"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/eclipse/paho.mqtt.golang/packets"
+	docker "github.com/fsouza/go-dockerclient"
 )
 
 func Test_Start(t *testing.T) {
@@ -1315,6 +1317,154 @@ func Test_ConnectRetryPublish(t *testing.T) {
 	p.Disconnect(250)
 	s.Disconnect(250)
 	memStore.Close()
+}
+
+func Test_ConnectRetryPublish2(t *testing.T) {
+	const tempLocalBroker = "tcp://localhost:1884" // Avoid clash with broker already on 1883
+
+	topic := "/test/connectRetry2"
+	payload := "sample Payload"
+	choke := make(chan bool)
+
+	// subscribe to topic and wait for expected message (only received after connection successful)
+	sops := NewClientOptions().AddBroker(tempLocalBroker).SetClientID("crp-sub").
+		SetConnectRetry(true). // It will fail on first connect so retry
+		SetConnectRetryInterval(time.Second / 2).
+		SetResumeSubs(true)
+	var f MessageHandler = func(client Client, msg Message) {
+		if msg.Topic() != topic || string(msg.Payload()) != payload {
+			t.Fatalf("Received unexpected message: %v, %v", msg.Topic(), msg.Payload())
+		}
+		choke <- true
+	}
+	sops.SetDefaultPublishHandler(f)
+
+	s := NewClient(sops)
+
+	// We'll connect after broker created
+
+	// Connect for publish - server not yet running
+	memStore := NewMemoryStore()
+	memStore.Open()
+	pops := NewClientOptions().AddBroker(tempLocalBroker).SetClientID("crp-pub").
+		SetStore(memStore).SetConnectRetry(true).SetConnectRetryInterval(time.Second / 2)
+	p := NewClient(pops).(*client)
+	connectToken := p.Connect()
+	p.Publish(topic, 1, true, payload)
+	// Check publish packet in the memorystore
+	ids := memStore.All()
+	if len(ids) == 0 {
+		t.Fatalf("Expected published message to be in store")
+	} else if len(ids) != 1 {
+		t.Fatalf("Expected 1 message to be in store")
+	}
+	packet := memStore.Get(ids[0])
+	if packet == nil {
+		t.Fatal("Failed to retrieve packet from store")
+	}
+	pp, ok := packet.(*packets.PublishPacket)
+	if !ok {
+		t.Fatalf("Message in store not of the expected type (%T)", packet)
+	}
+	if pp.TopicName != topic || string(pp.Payload) != payload {
+		t.Fatalf("Stored message Packet contents not as expected (%v, %v)", pp.TopicName, pp.Payload)
+	}
+	time.Sleep(time.Second) // Wait a second to ensure we are past SetConnectRetryInterval
+	if connectToken.Error() != nil {
+		t.Fatalf("Connect returned error (should be retrying) (%v)", connectToken.Error())
+	}
+
+	// Bring up the broker (and clean up afterwards)
+	t.Log("Bringing up broker (pulling mosquitto first if necessary)...")
+	dockerClient := createDockerClient(t)
+	containerID := createTempBroker(t, dockerClient)
+	defer destroyTempBroker(t, dockerClient, containerID)
+
+	t.Log("Broker now up and running")
+	time.Sleep(10 * time.Second)
+
+	// Connect the subscriber
+	if token := s.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Error on Client.Connect(): %v", token.Error())
+	}
+
+	// Subscribe to our topic - since it was sent with retain we should receive it even
+	// if it was published before we subscribed
+	if token := s.Subscribe(topic, 0, nil); token.Wait() && token.Error() != nil {
+		t.Fatalf("Error on Client.Subscribe(): %v", token.Error())
+	}
+
+	// Check that our message has got through
+	// - it hasn't so this will block until test times out
+	// You can force the test to pass by publishing '/test/connectRetry2' 'sample Payload' from another client
+	wait(choke)
+
+	p.Disconnect(250)
+	s.Disconnect(250)
+	memStore.Close()
+}
+
+func createDockerClient(t *testing.T) *docker.Client {
+	dockerClient, err := docker.NewClientFromEnv()
+	if err != nil {
+		t.Fatalf("Could not create new docker client")
+	}
+	return dockerClient
+}
+
+func createTempBroker(t *testing.T, dockerClient *docker.Client) string {
+
+	const targetPort = 1884
+	const imageName = "eclipse-mosquitto"
+	const imageTag = "latest"
+	imageFullName := fmt.Sprintf("%s:%s", imageName, imageTag)
+
+	_, err := dockerClient.InspectImage(imageFullName)
+	if err == docker.ErrNoSuchImage {
+		err = dockerClient.PullImage(docker.PullImageOptions{
+			Repository: imageName,
+			Tag:        imageTag,
+		}, docker.AuthConfiguration{})
+		if err != nil {
+			t.Fatal("Could not pull imag ")
+		}
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("could not get working directory")
+	}
+	opts := docker.CreateContainerOptions{
+		Config: &docker.Config{
+			Image:     imageFullName,
+			PortSpecs: []string{"1884:1883"},
+		},
+		HostConfig: &docker.HostConfig{
+			PortBindings: map[docker.Port][]docker.PortBinding{
+				"1883/tcp": {{HostIP: "0.0.0.0", HostPort: fmt.Sprintf("%d", targetPort)}},
+			},
+			Binds: []string{
+				fmt.Sprintf("%s/binds/mosquitto/config:/mosquitto/config", wd),
+			},
+		},
+	}
+	container, err := dockerClient.CreateContainer(opts)
+	if err != nil {
+		t.Fatalf("Could not create broker container")
+	}
+
+	err = dockerClient.StartContainer(container.ID, nil)
+	if err != nil {
+		t.Fatalf("Could not start broker container")
+	}
+	return container.ID
+}
+
+func destroyTempBroker(t *testing.T, dockerClient *docker.Client, containerID string) {
+	dockerClient.RemoveContainer(docker.RemoveContainerOptions{
+		ID:    containerID,
+		Force: true,
+	})
 }
 
 func Test_ResumeSubs(t *testing.T) {
